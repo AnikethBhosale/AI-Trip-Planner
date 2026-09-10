@@ -115,4 +115,6 @@ def build_graph():
 
 
 def plan_trip(request: TripRequest, feedback: str = "") -> PlannerState:
-    return build_graph().invoke({"request": request.model_dump(mode="json"), "research": {}, "replan_count": 0, "human_feedback": feedback})
+    # Keep native date objects in graph state for provider adapters. _ask() serializes
+    # them safely for the LLM with json.dumps(..., default=str).
+    return build_graph().invoke({"request": request.model_dump(), "research": {}, "replan_count": 0, "human_feedback": feedback})

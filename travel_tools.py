@@ -16,6 +16,13 @@ def _client() -> httpx.Client:
     return httpx.Client(timeout=float(settings()["timeout"]))
 
 
+def _iso_date(value: date | str) -> str:
+    """Accept either a native date from graph state or an ISO date from another caller."""
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
 def amadeus_token() -> str | None:
     cfg = settings()
     if not cfg["amadeus_client_id"] or not cfg["amadeus_client_secret"]:
@@ -55,7 +62,7 @@ def flight_offers(origin: str, destination: str, depart: date, returning: date, 
         response = _client().get(
             f'{str(settings()["amadeus_base_url"]).rstrip("/")}/v2/shopping/flight-offers',
             headers={"Authorization": f"Bearer {token}"},
-            params={"originLocationCode": origin_code, "destinationLocationCode": destination_code, "departureDate": depart.isoformat(), "returnDate": returning.isoformat(), "adults": travelers, "max": 5, "currencyCode": "USD"},
+            params={"originLocationCode": origin_code, "destinationLocationCode": destination_code, "departureDate": _iso_date(depart), "returnDate": _iso_date(returning), "adults": travelers, "max": 5, "currencyCode": "USD"},
         )
         return {"provider": "Amadeus Flight Offers", "available": True, "origin_code": origin_code, "destination_code": destination_code, "data": response.raise_for_status().json().get("data", [])}
     except httpx.HTTPError as exc:
@@ -76,7 +83,7 @@ def hotel_offers(city: str, check_in: date, check_out: date, adults: int) -> dic
         ids = ",".join(hotel["hotelId"] for hotel in hotels if hotel.get("hotelId"))
         if not ids:
             return {"provider": "Amadeus Hotel Search", "available": True, "data": [], "note": "No hotels returned for this location."}
-        offers = _client().get(f'{str(settings()["amadeus_base_url"]).rstrip("/")}/v3/shopping/hotel-offers', headers=headers, params={"hotelIds": ids, "checkInDate": check_in.isoformat(), "checkOutDate": check_out.isoformat(), "adults": adults, "roomQuantity": 1}).raise_for_status().json().get("data", [])
+        offers = _client().get(f'{str(settings()["amadeus_base_url"]).rstrip("/")}/v3/shopping/hotel-offers', headers=headers, params={"hotelIds": ids, "checkInDate": _iso_date(check_in), "checkOutDate": _iso_date(check_out), "adults": adults, "roomQuantity": 1}).raise_for_status().json().get("data", [])
         return {"provider": "Amadeus Hotel Search", "available": True, "city_code": city_code, "data": offers}
     except httpx.HTTPError as exc:
         return {"provider": "Amadeus Hotel Search", "available": False, "note": f"Provider response unavailable: {exc}"}
