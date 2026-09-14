@@ -7,7 +7,7 @@ Atlas is a Streamlit-based, multi-agent travel itinerary planner built with Lang
 - Required trip form fields for departure, destination, dates, traveller count, budget, currency, travel style, accommodation level, pace, interests, and dietary needs.
 - Optional free-text field for special occasions, accessibility needs, must-see places, and other context.
 - LangGraph orchestration with dedicated supervisor, flight, accommodation, activity/restaurant, weather, itinerary, route/budget, and validation agents.
-- Live-data adapters for Amadeus flight and hotel offers, Google Places, OpenWeather, and ExchangeRate-API.
+- Live-data adapters for Tavily web research, OpenStreetMap places, OSRM route samples, OpenWeather, and ExchangeRate-API.
 - Transparent fallback behavior: if a key is absent or a provider fails, the plan labels the data as unverified instead of inventing live availability or prices.
 - Automatic quality validation and a bounded replan loop (two retries by default).
 - A human-in-the-loop review panel where the traveller can ask for a revised plan after inspecting the result.
@@ -25,9 +25,9 @@ TripRequest (Pydantic validation)
 LangGraph workflow
     |
     +--> Supervisor: extracts and protects constraints
-    +--> Flight specialist: Amadeus flight data + ranking
-    +--> Accommodation specialist: Amadeus hotel data + neighbourhood guidance
-    +--> Activity/restaurant specialist: Google Places candidates
+    +--> Flight specialist: current web research + source-aware guidance
+    +--> Accommodation specialist: current web research + neighbourhood guidance
+    +--> Activity/restaurant specialist: OpenStreetMap place candidates
     +--> Weather specialist: OpenWeather forecast and contingencies
     +--> Itinerary designer: day-by-day trip plan
     +--> Route/budget optimizer: pacing, geographic order, and budget audit
@@ -68,12 +68,12 @@ LangGraph workflow
 | Agent | Purpose | Provider evidence when configured |
 | --- | --- | --- |
 | Supervisor | Converts the request into constraints for every downstream agent. | None required |
-| Flight specialist | Looks up and ranks flight choices; calls out unavailable options. | Amadeus Flight Offers |
-| Accommodation specialist | Recommends neighbourhoods and evaluates short hotel samples. | Amadeus Hotel Search |
-| Activity/restaurant specialist | Finds candidate attractions and food options aligned with interests/diet. | Google Places |
+| Flight specialist | Summarizes current flight research and explains what to verify. | Tavily web search |
+| Accommodation specialist | Recommends neighbourhoods and summarizes current accommodation research. | Tavily web search |
+| Activity/restaurant specialist | Finds mapped attractions and food venues aligned with interests/diet. | OpenStreetMap / Overpass |
 | Weather specialist | Adds weather context and indoor fallback ideas. | OpenWeather |
 | Itinerary designer | Synthesizes all findings into the traveller-facing itinerary. | All previous agent outputs |
-| Route/budget optimizer | Checks daily travel order, pacing, and cost reasoning. | ExchangeRate-API |
+| Route/budget optimizer | Checks daily travel order, pacing, and cost reasoning. | OSRM route sample + ExchangeRate-API |
 | Final validator | Acts as a quality gate and emits machine-readable approval/issues. | Itinerary + route/budget audit |
 
 ## Run locally
@@ -152,7 +152,7 @@ py -3 -m streamlit run app.py
 | `No module named streamlit` | Activate `.venv`, then rerun `py -3 -m pip install -r requirements.txt`. |
 | `OPENAI_API_KEY is missing` | Add a non-empty key in `.env`, save it, then stop and restart Streamlit. |
 | A travel provider is marked unavailable | Add that provider's key to `.env`, verify it is enabled in the provider dashboard, then restart the app. |
-| Live Amadeus data returns no options | Test with dates that meet the provider's sandbox rules; the application will still produce a clearly labelled planning-only result. |
+| OpenStreetMap/OSRM is unavailable | Public services can be busy. Retry later; the itinerary retains clear unavailable-data notes. |
 
 ## Configuration
 
@@ -162,11 +162,10 @@ py -3 -m streamlit run app.py
 | `OPENAI_BASE_URL` | Yes | OpenAI or compatible API base URL. |
 | `OPENAI_MODEL` | Yes | Chat/reasoning model used by agents. |
 | `OPENAI_EMBEDDING_MODEL` | Future use | Embedding model reserved for semantic retrieval. |
-| `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET` | Optional | Flight and hotel research. |
-| `GOOGLE_MAPS_API_KEY` | Optional | Places, attractions, and restaurant candidates. |
 | `OPENWEATHER_API_KEY` | Optional | Forecast evidence. |
 | `EXCHANGERATE_API_KEY` | Optional | Currency conversion evidence. |
-| `TAVILY_API_KEY` | Future use | Timely travel research, closures, and events. |
+| `TAVILY_API_KEY` | Optional | Current flight/stay research and timely travel information. |
+| `OSM_USER_AGENT` | Recommended | Identifies this low-volume prototype to OpenStreetMap services. |
 | `MAX_REPLAN_ATTEMPTS` | Optional | Automatic retry limit; defaults to `2`. |
 | `REQUEST_TIMEOUT_SECONDS` | Optional | Provider request timeout; defaults to `20`. |
 
@@ -175,20 +174,20 @@ py -3 -m streamlit run app.py
 | Provider | Used for | How to obtain it |
 | --- | --- | --- |
 | OpenAI (or compatible LLM) | Agent reasoning and itinerary writing | Create an API key in your provider dashboard; set `OPENAI_API_KEY`, base URL, and model. [OpenAI quickstart](https://platform.openai.com/docs/quickstart) |
-| Amadeus for Developers | Flight and hotel offers | Create a developer account, create an app, and copy its client ID/secret into `AMADEUS_CLIENT_ID` and `AMADEUS_CLIENT_SECRET`. Start with the test base URL. [Amadeus docs](https://developers.amadeus.com/) |
-| Google Maps Platform | Places and restaurant/attraction candidates | Create a Google Cloud project, enable Places API, attach billing, restrict the key, then set `GOOGLE_MAPS_API_KEY`. [Setup guide](https://developers.google.com/maps/documentation/places/web-service/get-api-key) |
+| OpenStreetMap + Overpass | Places, attractions, restaurants, and geocoding | No key is needed for this low-volume prototype. Set a meaningful `OSM_USER_AGENT`, follow public-service policies, and self-host or use a managed provider before production. [Nominatim policy](https://operations.osmfoundation.org/policies/nominatim/), [Overpass guide](https://wiki.openstreetmap.org/wiki/Overpass_API) |
+| OSRM | Indicative driving-route samples | No key is used for this prototype. The public demo service is not a production SLA; self-host or adopt a managed routing service for scale. [OSRM API docs](https://project-osrm.org/docs/) |
 | OpenWeather | Destination forecast | Register, create a key, wait for activation, then set `OPENWEATHER_API_KEY`. [OpenWeather API](https://openweathermap.org/api) |
 | ExchangeRate-API | Currency conversion evidence for budget checks | Create an account and copy the key into `EXCHANGERATE_API_KEY`. [ExchangeRate-API](https://www.exchangerate-api.com/) |
-| Tavily | Closures, events, and disruption research | Create an account and copy its key into `TAVILY_API_KEY`. Its adapter is intentionally not invoked until source/citation display is added. [Tavily](https://tavily.com/) |
+| Tavily | Current flight/stay research, closures, events, and disruptions | Create an account and copy its key into `TAVILY_API_KEY`. Results are exposed in the application's research trail. [Tavily Search API](https://docs.tavily.com/documentation/api-reference/endpoint/search) |
 
 ## Current MVP limitations and next steps
 
 - The graph is deliberately sequential for easy traceability. Independent research nodes can later be parallelized with LangGraph reducers and fan-out/fan-in edges.
-- Google Places legacy Text Search is used for a compact prototype. A production build should migrate to Places API (New), set quotas, and restrict keys.
+- Public OpenStreetMap, Overpass, and OSRM endpoints are suitable only for low-volume experimentation. Respect their policies; self-host or use managed services before public launch.
 - The app recommends and researches; it does not make bookings or store traveller profiles.
 - Results are generated for the current session only. Add PostgreSQL for saved plans, Redis for caching, and a vector store for preference memory.
-- Add Google Routes or Mapbox Directions to replace LLM-only geographic checks with actual transit times.
-- Add Tavily with visible citations for temporary closures, festivals, visa notices, and disruptions.
+- Add a commercial or self-hosted routing engine with transit support for production-grade journey times.
+- Render Tavily source links directly beside itinerary recommendations rather than only in the research trail.
 - Add authentication, server-side secret management, structured logging, rate limiting, tests, and monitoring before public deployment.
 
 ## Security and operational notes

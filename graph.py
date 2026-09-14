@@ -9,12 +9,13 @@ from langgraph.graph import END, START, StateGraph
 
 from config import settings
 from models import TripRequest
-from travel_tools import exchange_rates, flight_offers, hotel_offers, places, weather
+from travel_tools import exchange_rates, flight_research, hotel_research, places, route_estimate, weather
 
 
 class PlannerState(TypedDict, total=False):
     request: dict[str, Any]
     research: dict[str, Any]
+    tool_data: dict[str, Any]
     itinerary: str
     validation: dict[str, Any]
     replan_count: int
@@ -43,26 +44,26 @@ def supervisor(state: PlannerState) -> dict:
 
 def flight_agent(state: PlannerState) -> dict:
     r = state["request"]
-    evidence = flight_offers(r["departure_city"], r["destination_city"], r["departure_date"], r["return_date"], r["travelers"])
-    return {"research": {**state["research"], "flights": _ask("flight specialist", r, evidence, "Provide ranked travel choices or explain what must be verified. Treat city values as IATA codes only when they are actually IATA codes.")}}
+    evidence = flight_research(r["departure_city"], r["destination_city"], r["departure_date"], r["return_date"], r["travelers"])
+    return {"research": {**state["research"], "flights": _ask("flight research specialist", r, evidence, "Summarize reputable current sources. Never quote a price or availability as confirmed; advise the traveller to verify it with the airline or booking provider." )}, "tool_data": {**state.get("tool_data", {}), "flights": evidence}}
 
 
 def stay_agent(state: PlannerState) -> dict:
     r = state["request"]
-    evidence = hotel_offers(r["destination_city"], r["departure_date"], r["return_date"], r["travelers"])
-    return {"research": {**state["research"], "stay": _ask("accommodation specialist", r, evidence, "Recommend neighborhoods and rank data-backed options. Do not claim real-time hotel availability without data.")}}
+    evidence = hotel_research(r["destination_city"], r["departure_date"], r["return_date"], r["travelers"])
+    return {"research": {**state["research"], "stay": _ask("accommodation research specialist", r, evidence, "Recommend neighbourhoods and summarize reputable research. Do not claim real-time hotel availability without a booking-provider confirmation.")}, "tool_data": {**state.get("tool_data", {}), "stays": evidence}}
 
 
 def activity_agent(state: PlannerState) -> dict:
     r = state["request"]
-    evidence = places(f"top attractions and restaurants in {r['destination_city']} for {', '.join(r['interests'])}")
-    return {"research": {**state["research"], "activities": _ask("activity and restaurant specialist", r, evidence, "Suggest a geographically sensible, preference-aware shortlist with indoor backups.")}}
+    evidence = places(r["destination_city"], r["interests"])
+    return {"research": {**state["research"], "activities": _ask("activity and restaurant specialist", r, evidence, "Suggest a geographically sensible, preference-aware shortlist with indoor backups. State that opening hours must be verified.")}, "tool_data": {**state.get("tool_data", {}), "places": evidence}}
 
 
 def weather_agent(state: PlannerState) -> dict:
     r = state["request"]
     evidence = weather(r["destination_city"])
-    return {"research": {**state["research"], "weather": _ask("weather specialist", r, evidence, "Identify weather caveats and indoor/outdoor contingency guidance.")}}
+    return {"research": {**state["research"], "weather": _ask("weather specialist", r, evidence, "Identify weather caveats and indoor/outdoor contingency guidance.")}, "tool_data": {**state.get("tool_data", {}), "weather": evidence}}
 
 
 def itinerary_agent(state: PlannerState) -> dict:
@@ -72,8 +73,8 @@ def itinerary_agent(state: PlannerState) -> dict:
 
 def route_budget_agent(state: PlannerState) -> dict:
     r = state["request"]
-    evidence = {"itinerary": state["itinerary"], "exchange_rates": exchange_rates(r["currency"])}
-    return {"research": {**state["research"], "route_budget": _ask("route and budget optimizer", r, evidence, "Audit travel order, daily pacing, and total cost against the stated budget. Return specific corrections.")}}
+    evidence = {"itinerary": state["itinerary"], "exchange_rates": exchange_rates(r["currency"]), "route_sample": route_estimate(state.get("tool_data", {}).get("places", {}))}
+    return {"research": {**state["research"], "route_budget": _ask("route and budget optimizer", r, evidence, "Audit travel order, daily pacing, and total cost against the stated budget. Treat the routing sample as a rough driving estimate, not public-transit truth. Return specific corrections.")}, "tool_data": {**state.get("tool_data", {}), "route_budget": evidence}}
 
 
 def validator(state: PlannerState) -> dict:
@@ -117,4 +118,11 @@ def build_graph():
 def plan_trip(request: TripRequest, feedback: str = "") -> PlannerState:
     # Keep native date objects in graph state for provider adapters. _ask() serializes
     # them safely for the LLM with json.dumps(..., default=str).
-    return build_graph().invoke({"request": request.model_dump(), "research": {}, "replan_count": 0, "human_feedback": feedback})
+    return build_graph().invoke({"request": request.model_dump(), "research": {}, "tool_data": {}, "replan_count": 0, "human_feedback": feedback})
+
+
+def plan_trip_stream(request: TripRequest, feedback: str = ""):
+    """Yield completed graph-node updates so Streamlit can show a live planning journey."""
+    initial_state = {"request": request.model_dump(), "research": {}, "tool_data": {}, "replan_count": 0, "human_feedback": feedback}
+    for update in build_graph().stream(initial_state, stream_mode="updates"):
+        yield update

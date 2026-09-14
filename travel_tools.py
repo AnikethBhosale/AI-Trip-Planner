@@ -1,11 +1,17 @@
-"""Small, provider-isolated adapters. Each returns structured data or an availability note."""
+"""Low-cost travel-data adapters with explicit fallback and attribution-friendly results."""
 from __future__ import annotations
 
 from datetime import date
 from typing import Any
+
 import httpx
 
 from config import settings
+
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OSRM_URL = "https://router.project-osrm.org"
+TAVILY_URL = "https://api.tavily.com/search"
 
 
 def _disabled(provider: str, key: str) -> dict[str, Any]:
@@ -13,80 +19,100 @@ def _disabled(provider: str, key: str) -> dict[str, Any]:
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(timeout=float(settings()["timeout"]))
+    return httpx.Client(
+        timeout=float(settings()["timeout"]),
+        headers={"User-Agent": str(settings()["osm_user_agent"]), "Accept": "application/json"},
+    )
 
 
 def _iso_date(value: date | str) -> str:
-    """Accept either a native date from graph state or an ISO date from another caller."""
-    if isinstance(value, str):
-        return value
-    return value.isoformat()
+    return value if isinstance(value, str) else value.isoformat()
 
 
-def amadeus_token() -> str | None:
-    cfg = settings()
-    if not cfg["amadeus_client_id"] or not cfg["amadeus_client_secret"]:
-        return None
+def tavily_search(query: str, max_results: int = 5) -> dict[str, Any]:
+    """Current web research for flights, stays, closures, and travel advisories."""
+    key = settings()["tavily_api_key"]
+    if not key:
+        return _disabled("Tavily web research", "TAVILY_API_KEY")
     try:
         response = _client().post(
-            f'{str(cfg["amadeus_base_url"]).rstrip("/")}/v1/security/oauth2/token',
-            data={"grant_type": "client_credentials", "client_id": cfg["amadeus_client_id"], "client_secret": cfg["amadeus_client_secret"]},
+            TAVILY_URL,
+            headers={"Authorization": f"Bearer {key}"},
+            json={"query": query, "search_depth": "basic", "max_results": max_results, "include_answer": False},
         )
-        return response.raise_for_status().json().get("access_token")
-    except httpx.HTTPError:
-        return None
-
-
-def _amadeus_city_code(city: str, token: str) -> str | None:
-    """Resolve a readable city/airport name to an IATA location code."""
-    try:
-        response = _client().get(
-            f'{str(settings()["amadeus_base_url"]).rstrip("/")}/v1/reference-data/locations',
-            headers={"Authorization": f"Bearer {token}"},
-            params={"keyword": city, "subType": "CITY,AIRPORT", "page[limit]": 1},
-        )
-        results = response.raise_for_status().json().get("data", [])
-        return results[0].get("iataCode") if results else None
-    except httpx.HTTPError:
-        return None
-
-
-def flight_offers(origin: str, destination: str, depart: date, returning: date, travelers: int) -> dict[str, Any]:
-    token = amadeus_token()
-    if not token:
-        return _disabled("Amadeus Flight Offers", "AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET")
-    origin_code, destination_code = _amadeus_city_code(origin, token), _amadeus_city_code(destination, token)
-    if not origin_code or not destination_code:
-        return {"provider": "Amadeus Flight Offers", "available": False, "note": "Could not resolve an IATA city/airport code.", "origin": origin, "destination": destination}
-    try:
-        response = _client().get(
-            f'{str(settings()["amadeus_base_url"]).rstrip("/")}/v2/shopping/flight-offers',
-            headers={"Authorization": f"Bearer {token}"},
-            params={"originLocationCode": origin_code, "destinationLocationCode": destination_code, "departureDate": _iso_date(depart), "returnDate": _iso_date(returning), "adults": travelers, "max": 5, "currencyCode": "USD"},
-        )
-        return {"provider": "Amadeus Flight Offers", "available": True, "origin_code": origin_code, "destination_code": destination_code, "data": response.raise_for_status().json().get("data", [])}
+        payload = response.raise_for_status().json()
+        results = [
+            {"title": item.get("title"), "url": item.get("url"), "snippet": item.get("content")}
+            for item in payload.get("results", [])
+        ]
+        return {"provider": "Tavily", "available": True, "query": query, "sources": results}
     except httpx.HTTPError as exc:
-        return {"provider": "Amadeus Flight Offers", "available": False, "note": f"Provider response unavailable: {exc}"}
+        return {"provider": "Tavily", "available": False, "note": f"Research request unavailable: {exc}"}
 
 
-def hotel_offers(city: str, check_in: date, check_out: date, adults: int) -> dict[str, Any]:
-    """Get a small live sample. Production apps should add pagination and rate-limit handling."""
-    token = amadeus_token()
-    if not token:
-        return _disabled("Amadeus Hotel Search", "AMADEUS_CLIENT_ID / AMADEUS_CLIENT_SECRET")
-    city_code = _amadeus_city_code(city, token)
-    if not city_code:
-        return {"provider": "Amadeus Hotel Search", "available": False, "note": "Could not resolve the destination IATA city code."}
-    headers = {"Authorization": f"Bearer {token}"}
+def flight_research(origin: str, destination: str, depart: date | str, returning: date | str, travelers: int) -> dict[str, Any]:
+    return tavily_search(
+        f"flight options {origin} to {destination} departing {_iso_date(depart)} returning {_iso_date(returning)} for {travelers} travellers official airline or reputable travel source"
+    )
+
+
+def hotel_research(city: str, check_in: date | str, check_out: date | str, travelers: int) -> dict[str, Any]:
+    return tavily_search(
+        f"best areas and accommodation options in {city} for {travelers} travellers {_iso_date(check_in)} to {_iso_date(check_out)} reputable travel source"
+    )
+
+
+def geocode_city(city: str) -> dict[str, Any]:
     try:
-        hotels = _client().get(f'{str(settings()["amadeus_base_url"]).rstrip("/")}/v1/reference-data/locations/hotels/by-city', headers=headers, params={"cityCode": city_code, "radius": 10, "radiusUnit": "KM", "hotelSource": "ALL"}).raise_for_status().json().get("data", [])[:5]
-        ids = ",".join(hotel["hotelId"] for hotel in hotels if hotel.get("hotelId"))
-        if not ids:
-            return {"provider": "Amadeus Hotel Search", "available": True, "data": [], "note": "No hotels returned for this location."}
-        offers = _client().get(f'{str(settings()["amadeus_base_url"]).rstrip("/")}/v3/shopping/hotel-offers', headers=headers, params={"hotelIds": ids, "checkInDate": _iso_date(check_in), "checkOutDate": _iso_date(check_out), "adults": adults, "roomQuantity": 1}).raise_for_status().json().get("data", [])
-        return {"provider": "Amadeus Hotel Search", "available": True, "city_code": city_code, "data": offers}
+        response = _client().get(NOMINATIM_URL, params={"q": city, "format": "jsonv2", "limit": 1})
+        item = response.raise_for_status().json()
+        if not item:
+            return {"provider": "OpenStreetMap Nominatim", "available": False, "note": "Location was not found."}
+        return {"provider": "OpenStreetMap Nominatim", "available": True, "lat": float(item[0]["lat"]), "lon": float(item[0]["lon"]), "display_name": item[0].get("display_name")}
     except httpx.HTTPError as exc:
-        return {"provider": "Amadeus Hotel Search", "available": False, "note": f"Provider response unavailable: {exc}"}
+        return {"provider": "OpenStreetMap Nominatim", "available": False, "note": f"Geocoding unavailable: {exc}"}
+
+
+def places(city: str, interests: list[str]) -> dict[str, Any]:
+    """Find nearby attractions and food venues from OpenStreetMap without a maps key."""
+    location = geocode_city(city)
+    if not location.get("available"):
+        return location
+    lat, lon = location["lat"], location["lon"]
+    query = f"""[out:json][timeout:20];
+    (nwr(around:6000,{lat},{lon})[tourism];
+     nwr(around:6000,{lat},{lon})[historic];
+     nwr(around:6000,{lat},{lon})[leisure];
+     nwr(around:6000,{lat},{lon})[amenity~\"restaurant|cafe\"]);
+    out center tags 30;"""
+    try:
+        response = _client().post(OVERPASS_URL, data={"data": query})
+        elements = response.raise_for_status().json().get("elements", [])
+        candidates = []
+        for item in elements:
+            tags = item.get("tags", {})
+            name = tags.get("name")
+            item_lat = item.get("lat", item.get("center", {}).get("lat"))
+            item_lon = item.get("lon", item.get("center", {}).get("lon"))
+            if name and item_lat is not None and item_lon is not None:
+                candidates.append({"name": name, "category": tags.get("tourism") or tags.get("historic") or tags.get("leisure") or tags.get("amenity"), "lat": item_lat, "lon": item_lon, "tags": {key: tags[key] for key in ("cuisine", "opening_hours", "website") if key in tags}})
+        return {"provider": "OpenStreetMap / Overpass", "available": True, "location": location, "interests": interests, "data": candidates[:20], "attribution": "© OpenStreetMap contributors"}
+    except httpx.HTTPError as exc:
+        return {"provider": "OpenStreetMap / Overpass", "available": False, "note": f"Places request unavailable: {exc}"}
+
+
+def route_estimate(place_data: dict[str, Any]) -> dict[str, Any]:
+    """A small OSRM sample to inform the route agent; never presented as guaranteed transit time."""
+    candidates = place_data.get("data", [])[:4]
+    if len(candidates) < 2:
+        return {"provider": "OSRM", "available": False, "note": "Not enough mapped places for a route sample."}
+    coordinates = ";".join(f"{item['lon']},{item['lat']}" for item in candidates)
+    try:
+        response = _client().get(f"{OSRM_URL}/route/v1/driving/{coordinates}", params={"overview": "false", "steps": "false"})
+        route = response.raise_for_status().json().get("routes", [{}])[0]
+        return {"provider": "OSRM", "available": True, "sample_places": [item["name"] for item in candidates], "distance_km": round(route.get("distance", 0) / 1000, 1), "duration_minutes": round(route.get("duration", 0) / 60)}
+    except (httpx.HTTPError, IndexError) as exc:
+        return {"provider": "OSRM", "available": False, "note": f"Route sample unavailable: {exc}"}
 
 
 def weather(city: str) -> dict[str, Any]:
@@ -98,18 +124,7 @@ def weather(city: str) -> dict[str, Any]:
         payload = response.raise_for_status().json()
         return {"provider": "OpenWeather", "available": True, "data": payload.get("list", [])[:12]}
     except httpx.HTTPError as exc:
-        return {"provider": "OpenWeather", "available": False, "note": f"Provider response unavailable: {exc}"}
-
-
-def places(query: str) -> dict[str, Any]:
-    key = settings()["google_maps_api_key"]
-    if not key:
-        return _disabled("Google Places", "GOOGLE_MAPS_API_KEY")
-    try:
-        response = _client().get("https://maps.googleapis.com/maps/api/place/textsearch/json", params={"query": query, "key": key})
-        return {"provider": "Google Places", "available": True, "data": response.raise_for_status().json().get("results", [])[:10]}
-    except httpx.HTTPError as exc:
-        return {"provider": "Google Places", "available": False, "note": f"Provider response unavailable: {exc}"}
+        return {"provider": "OpenWeather", "available": False, "note": f"Weather request unavailable: {exc}"}
 
 
 def exchange_rates(base: str) -> dict[str, Any]:
@@ -120,4 +135,4 @@ def exchange_rates(base: str) -> dict[str, Any]:
         response = _client().get(f"https://v6.exchangerate-api.com/v6/{key}/latest/{base}")
         return {"provider": "ExchangeRate-API", "available": True, "data": response.raise_for_status().json().get("conversion_rates", {})}
     except httpx.HTTPError as exc:
-        return {"provider": "ExchangeRate-API", "available": False, "note": f"Provider response unavailable: {exc}"}
+        return {"provider": "ExchangeRate-API", "available": False, "note": f"Currency request unavailable: {exc}"}
