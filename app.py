@@ -25,29 +25,41 @@ st.markdown("""
 CITIES = ["Amsterdam", "Bangkok", "Barcelona", "Berlin", "Bali", "Budapest", "Dubai", "Hong Kong", "Istanbul", "Jaipur", "Kyoto", "Lisbon", "London", "New Delhi", "New York", "Paris", "Prague", "Rome", "Seoul", "Singapore", "Sydney", "Tokyo", "Toronto", "Vienna", "Zurich"]
 INTERESTS = ["Food", "History", "Museums", "Nature", "Nightlife", "Shopping", "Adventure", "Wellness", "Family activities", "Photography"]
 STAGES = {
-    "supervisor": (8, "Reading your travel brief and protecting every constraint"),
-    "flights": (20, "Scanning current flight research"),
-    "stay": (32, "Exploring the best areas to stay"),
-    "activities": (48, "Pinning experiences, food, and hidden gems"),
-    "weather": (60, "Checking weather and smart backup options"),
-    "itinerary": (74, "Designing your day-by-day journey"),
-    "route_budget": (87, "Checking pace, route flow, and budget"),
+    "supervisor": (10, "Reading your travel brief and protecting every constraint"),
+    "flights": (0, "Scanning current flight research"),
+    "stay": (0, "Exploring the best areas to stay"),
+    "activities": (0, "Pinning experiences, food, and hidden gems"),
+    "weather": (0, "Checking weather and smart backup options"),
+    "itinerary": (72, "Designing your day-by-day journey"),
+    "route_budget": (84, "Checking pace, route flow, and budget"),
     "validator": (96, "Putting the plan through its final quality check"),
-    "replan": (99, "Tuning the itinerary based on validation feedback"),
+    "replan": (68, "Validator requested a thoughtful tune-up"),
 }
+RESEARCH_NODES = {"flights", "stay", "activities", "weather"}
 
 
 def run_planner(request: TripRequest, feedback: str = "") -> dict:
     """Show LangGraph updates as a lively, transparent planning sequence."""
     final_state: dict = {"research": {}, "tool_data": {}}
+    completed_research: set[str] = set()
     progress = st.progress(0, text="Packing the essentials for your planning journey…")
     with st.status("Atlas is planning your trip", expanded=True) as status:
         for update in plan_trip_stream(request, feedback):
-            node, payload = next(iter(update.items()))
-            percent, label = STAGES.get(node, (50, "Planning your trip"))
-            progress.progress(percent, text=label)
-            status.write(f"**{label}**")
-            final_state.update(payload)
+            for node, payload in update.items():
+                if node.startswith("__"):
+                    continue
+                for key, value in payload.items():
+                    if key in {"research", "tool_data"}:
+                        final_state[key].update(value)
+                    else:
+                        final_state[key] = value
+                percent, label = STAGES.get(node, (50, "Planning your trip"))
+                if node in RESEARCH_NODES:
+                    completed_research.add(node)
+                    percent = 10 + len(completed_research) * 12
+                    label = f"{label}  ·  Research team: {len(completed_research)}/4 complete"
+                progress.progress(percent, text=label)
+                status.write(f"**{label}**")
         status.update(label="Your personalised itinerary is ready", state="complete", expanded=False)
     progress.progress(100, text="Ready to explore")
     return final_state
@@ -55,7 +67,7 @@ def run_planner(request: TripRequest, feedback: str = "") -> dict:
 
 with st.sidebar:
     st.markdown("### ✦ How Atlas thinks")
-    st.caption("Your complete brief is passed through specialist research, itinerary design, feasibility checks, and a final validator.")
+    st.caption("Four independent specialists research in parallel, then Atlas designs, checks, and validates your itinerary.")
     st.markdown("""
     1. **Tell us the essentials**
     2. **Watch the planning journey**

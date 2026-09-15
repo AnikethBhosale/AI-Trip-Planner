@@ -20,4 +20,5 @@ def settings() -> dict[str, str | int]:
         "osm_user_agent": os.getenv("OSM_USER_AGENT", "AtlasAITripPlanner/1.0 (local-development)"),
         "timeout": int(os.getenv("REQUEST_TIMEOUT_SECONDS", "20")),
         "max_replans": int(os.getenv("MAX_REPLAN_ATTEMPTS", "2")),
+        "max_parallel_agents": int(os.getenv("MAX_PARALLEL_AGENTS", "4")),
     }

@@ -25,10 +25,10 @@ TripRequest (Pydantic validation)
 LangGraph workflow
     |
     +--> Supervisor: extracts and protects constraints
-    +--> Flight specialist: current web research + source-aware guidance
-    +--> Accommodation specialist: current web research + neighbourhood guidance
-    +--> Activity/restaurant specialist: OpenStreetMap place candidates
-    +--> Weather specialist: OpenWeather forecast and contingencies
+    +--> Flight specialist -----------+
+    +--> Accommodation specialist ----+--> run in parallel, then join
+    +--> Activity/restaurant specialist+
+    +--> Weather specialist ----------+
     +--> Itinerary designer: day-by-day trip plan
     +--> Route/budget optimizer: pacing, geographic order, and budget audit
     +--> Final validator: quality gate
@@ -57,11 +57,11 @@ LangGraph workflow
 1. The traveller completes the form. Mandatory structured controls reduce missing details that can make plans unreliable.
 2. Pydantic rejects invalid requests, such as a return date earlier than the departure date.
 3. The supervisor establishes the non-negotiable requirements: budget, pace, dietary needs, accommodation preference, and interests.
-4. Specialist agents gather or interpret information in sequence. The live adapters return structured provider data, while the LLM explains and ranks it.
+4. Flight, accommodation, activity, and weather specialists gather information concurrently. LangGraph merges their independent state updates and waits for all four before itinerary generation begins.
 5. The itinerary agent builds a day-by-day schedule with morning, afternoon, evening, transit buffers, food ideas, cost categories, and verification notes.
 6. The route/budget agent checks whether the schedule is geographically plausible and consistent with the requested budget.
 7. The validator checks dates, preferences, dietary needs, pacing, transit buffers, budget treatment, and caveats around unavailable live data. If it finds material problems, its issues are passed back to the itinerary agent for revision.
-8. The traveller sees the itinerary and the validation report. They may enter feedback such as “fewer museums” or “more vegetarian street food,” then generate a revised plan.
+8. The traveller sees the itinerary and the validation report. They may enter feedback such as “fewer museums” or “more vegetarian street food,” then generate a revised plan using the form values, specialist research, and the prior itinerary as context.
 
 ## Agent responsibilities
 
@@ -167,6 +167,7 @@ py -3 -m streamlit run app.py
 | `TAVILY_API_KEY` | Optional | Current flight/stay research and timely travel information. |
 | `OSM_USER_AGENT` | Recommended | Identifies this low-volume prototype to OpenStreetMap services. |
 | `MAX_REPLAN_ATTEMPTS` | Optional | Automatic retry limit; defaults to `2`. |
+| `MAX_PARALLEL_AGENTS` | Optional | Maximum simultaneous research agents; defaults to `4`. |
 | `REQUEST_TIMEOUT_SECONDS` | Optional | Provider request timeout; defaults to `20`. |
 
 ## API setup checklist
@@ -182,7 +183,7 @@ py -3 -m streamlit run app.py
 
 ## Current MVP limitations and next steps
 
-- The graph is deliberately sequential for easy traceability. Independent research nodes can later be parallelized with LangGraph reducers and fan-out/fan-in edges.
+- Research agents run concurrently for lower latency. Their completion order is intentionally non-deterministic and shown live in the UI.
 - Public OpenStreetMap, Overpass, and OSRM endpoints are suitable only for low-volume experimentation. Respect their policies; self-host or use managed services before public launch.
 - The app recommends and researches; it does not make bookings or store traveller profiles.
 - Results are generated for the current session only. Add PostgreSQL for saved plans, Redis for caching, and a vector store for preference memory.
